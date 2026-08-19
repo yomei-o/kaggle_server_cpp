@@ -1,0 +1,25 @@
+# build artifacts
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.o
+*.a
+cpp/build/out/
+# python
+__pycache__/
+*.pyc
+.venv/
+# local secrets: Kaggle Jupyter URL contains an auth token
+.kbridge.json
+.kbridge.local
+*.local.json
+kaggle.json
+# pulled kernels / downloaded artifacts
+work/
+downloads/
+
+# テスト用の自己署名証明書（cpp/build/testcert/gen.sh で生成する）
+cpp/build/testcert/server.crt
+cpp/build/testcert/server.key
+scratch/
