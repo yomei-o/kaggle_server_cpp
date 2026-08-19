@@ -41,7 +41,22 @@ POSIX = os.name == "posix"
 BASH = shutil.which("bash") or "/bin/bash"
 STDBUF = shutil.which("stdbuf")
 
-ROOT = os.environ.get("KBRIDGE_ROOT", "/kaggle/working/.kbridge")
+
+def _default_root():
+    """ジョブのメタとログを置く場所。Kaggle なら /kaggle/working の下。
+
+    ローカル試験（tests/fake_jupyter.py）では /kaggle/working が無いので、
+    書ける場所へ落とす。ここを環境依存にしておけば、呼び出し側は何も変えなくてよい。
+    """
+    env = os.environ.get("KBRIDGE_ROOT")
+    if env:
+        return env
+    if os.path.isdir("/kaggle/working"):
+        return "/kaggle/working/.kbridge"
+    return os.path.join(os.path.expanduser("~"), ".kbridge")
+
+
+ROOT = _default_root()
 JOBS = os.path.join(ROOT, "jobs")
 
 

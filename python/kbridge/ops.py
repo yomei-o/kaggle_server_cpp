@@ -16,55 +16,68 @@ import os
 from .jupyter import JupyterError
 
 AGENT_VERSION = "0.1.0"
-AGENT_DIR = "/kaggle/working/.kbridge"
-AGENT_REMOTE_PATH = ".kbridge/kbagent.py"   # contents API から見た相対パス
 EXIT_MARKER = "__KBRIDGE_EXIT__"
 
-_PRELUDE = (
+# kbagent はファイルとして置かずに、カーネルの sys.modules へ直接注入する。
+# ファイルにすると「どこに置けば import できるか」が環境（本物の Kaggle / 偽サーバ）に
+# よって変わってしまうため。base64 で運ぶのは、C++ 版と全く同じ 1 行を作るのに
+# エスケープの流儀を合わせなくて済むから。
+_PRELUDE = "import sys, json\nimport kbagent\n"
+
+_CHECK_CODE = (
     "import sys, json\n"
-    "sys.path.insert(0, %r) if %r not in sys.path else None\n" % (AGENT_DIR, AGENT_DIR)
+    "v = ''\n"
+    "try:\n"
+    "    import kbagent\n"
+    "    v = getattr(kbagent, 'VERSION', '')\n"
+    "except Exception:\n"
+    "    pass\n"
+    "print(json.dumps({'version': v}))\n"
+)
+
+_INJECT_TEMPLATE = (
+    "import sys, types, json, base64\n"
+    "m = types.ModuleType('kbagent')\n"
+    "exec(compile(base64.b64decode('%s').decode('utf-8'), 'kbagent.py', 'exec'),"
+    " m.__dict__)\n"
+    "sys.modules['kbagent'] = m\n"
+    "print(json.dumps({'version': m.VERSION, 'root': m.ROOT}))\n"
 )
 
 
-def agent_source():
-    """同梱している kaggle/kbagent.py の中身を返す。"""
+def agent_path():
     here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.normpath(os.path.join(here, "..", "..", "kaggle", "kbagent.py"))
-    with open(path, "rb") as f:
+    return os.path.normpath(os.path.join(here, "..", "..", "kaggle", "kbagent.py"))
+
+
+def agent_source():
+    """同梱している kaggle/kbagent.py の中身を返す（cpp 版も同じファイルを読む）。"""
+    with open(agent_path(), "rb") as f:
         return f.read()
 
 
-def ensure_agent(client, force=False):
-    """Kaggle 側に kbagent.py が正しい版で置かれている状態にする。
+def inject_code():
+    import base64 as _b64
+    return _INJECT_TEMPLATE % _b64.b64encode(agent_source()).decode("ascii")
 
-    毎回アップロードすると往復が増えるので、まず版を訊いて、違うときだけ送る。
+
+def ensure_agent(client, force=False):
+    """カーネルに kbagent が正しい版で載っている状態にする。
+
+    毎回注入すると往復が増えるので、まず版を訊いて、違うときだけ送る。
+    カーネルを再起動されたら版が空になるので、そこでまた送られる。
     """
     if not force:
-        code = _PRELUDE + (
-            "v = ''\n"
-            "try:\n"
-            "    import kbagent\n"
-            "    v = getattr(kbagent, 'VERSION', '')\n"
-            "except Exception:\n"
-            "    pass\n"
-            "print(json.dumps({'version': v}))\n"
-        )
         try:
-            if client.execute_json(code, timeout=60).get("version") == AGENT_VERSION:
+            if client.execute_json(_CHECK_CODE, timeout=60).get("version") \
+                    == AGENT_VERSION:
                 return False
         except JupyterError:
             pass
 
-    client.put_file(AGENT_REMOTE_PATH, agent_source())
-    code = _PRELUDE + (
-        "import importlib\n"
-        "import kbagent\n"
-        "importlib.reload(kbagent)\n"
-        "print(json.dumps({'version': kbagent.VERSION}))\n"
-    )
-    got = client.execute_json(code, timeout=60).get("version")
+    got = client.execute_json(inject_code(), timeout=120).get("version")
     if got != AGENT_VERSION:
-        raise JupyterError("kbagent version mismatch after upload: %r" % (got,))
+        raise JupyterError("kbagent version mismatch after inject: %r" % (got,))
     return True
 
 
