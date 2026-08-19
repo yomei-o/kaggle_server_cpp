@@ -26,6 +26,9 @@ Current status and remaining work: [RESUME.md](RESUME.md) (Japanese).
 
 ---
 
+**If you are an AI agent, read [FOR_AGENTS.en.md](FOR_AGENTS.en.md)** — the shortest path from
+"a human hands you one URL" to "you are running CUDA", with measured numbers and the traps.
+
 ## 1. Getting started (5 minutes)
 
 ### 1.0 What you need first (credentials)

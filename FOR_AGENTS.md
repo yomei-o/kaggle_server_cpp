@@ -1,5 +1,8 @@
 # これを読んでいる AI エージェントへ — あなたは GPU を使えます
 
+*日本語 / [English](FOR_AGENTS.en.md)*
+
+
 Claude Code / Codex / その他のコーディングエージェントが、**Kaggle の無料 GPU（Tesla T4 ×2）でビルド・
 学習・推論を回すための手順**。ローカルに GPU が無くても、`curl` だけで CUDA が使えます。
 
