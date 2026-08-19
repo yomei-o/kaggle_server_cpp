@@ -1,5 +1,7 @@
 # kaggle_server_cpp — Kaggle の GPU をローカルの HTTP API で使う（kbridge）
 
+*日本語 / [English README](README.en.md)*
+
 Kaggle Notebook が出す **"VSCode Compatible URL"**（＝ Kaggle がホストしている Jupyter Server の
 エンドポイント）を、VS Code の Jupyter 拡張の代わりに**自前のローカルサーバ**から叩く。
 これで Claude Code や `curl` から、Kaggle の無料 GPU（T4×2 / P100）でコードをビルド・実行・学習できる。
