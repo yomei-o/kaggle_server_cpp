@@ -1,6 +1,6 @@
 # RESUME — kbridge の実装状況と残作業
 
-最終更新: 2026-08-19
+最終更新: 2026-08-19（本物の Kaggle T4 x2 で疎通確認済み）
 
 使い方は [README.md](README.md)、REST 仕様は [spec/API.md](spec/API.md)（こちらが正）。
 
@@ -10,18 +10,38 @@
 
 | 機能 | python 版 | cpp 版 | 備考 |
 |---|---|---|---|
-| セッション（接続/再利用/切断/割り込み/再起動） | ✅ | ⏳ | 既存カーネル再利用が既定 |
-| `/exec`, `/exec/stream` | ✅ | ⏳ | NDJSON で逐次出力 |
-| `/sh`, `/sh/stream`（終了コード付き） | ✅ | ⏳ | |
-| `/gpu` | ✅ | ⏳ | GPU 無しでも `ok:true, gpus:[]` |
-| `/upload`, `/download`, `/ls`, `/mkdir`, `/rm` | ✅ | ⏳ | バイナリは base64 |
-| `/job`（切り離し実行・増分ログ・kill） | ✅ | ⏳ | **学習はこれを使う** |
-| `/batch/*`（kaggle CLI） | ✅ | ⏳ | CLI 不在なら `ok:false` |
-| CLI（connect/exec/run/put/get/sync/job/batch） | ✅ | ⏳ | |
-| 偽 Jupyter サーバでの試験 | ✅ 37/37 | ⏳ | Kaggle 枠を使わない |
+| セッション（接続/再利用/切断/割り込み/再起動） | ✅ | ✅ | 既存カーネル再利用が既定 |
+| `/exec`, `/exec/stream` | ✅ | ✅ | NDJSON で逐次出力 |
+| `/sh`, `/sh/stream`（終了コード付き） | ✅ | ✅ | |
+| `/gpu` | ✅ | ✅ | GPU 無しでも `ok:true, gpus:[]` |
+| `/upload`, `/download`, `/ls`, `/mkdir`, `/rm` | ✅ | ✅ | バイナリは base64 |
+| `/job`（切り離し実行・増分ログ・kill） | ✅ | ✅ | **学習はこれを使う** |
+| `/batch/*`（kaggle CLI） | ✅ | ✅ | CLI 不在なら `ok:false` |
+| CLI（connect/exec/run/put/get/sync/job/batch） | ✅ | ✅ | |
+| 偽 Jupyter サーバでの試験 | ✅ 37/37 | ✅ 37/37 | Kaggle 枠を使わない |
+| 2 実装のパリティ | ✅ 29/29 | ✅ | 生成コードはバイト単位で一致 |
+| CLI のパリティ | ✅ 11/11 | ✅ | 出力と終了コードが一致 |
 | TLS(mbedTLS) + WSS の土台 | — | ✅ 6/6 | mingw / MSVC 両方 |
+| **本物の Kaggle GPU での実行** | ✅ | ✅ | 下記 |
 
-✅ = 動作確認済み、⏳ = これから、— = 対象外
+✅ = 動作確認済み、— = 対象外
+
+### 本物の Kaggle（T4 x2 セッション）で確認したこと
+
+2026-08-19 に実機で通した。python 版・cpp 版の**両方**で同じ結果。
+
+| 見たこと | 結果 |
+|---|---|
+| VSCode Compatible URL への接続 | 既存カーネルを再利用して接続（`reuse: true`） |
+| カーネル環境 | Python 3.12.13 / Ubuntu 22.04 / 4 vCPU / 31 GB RAM / `/kaggle/working` 20 GB |
+| `GET /gpu` | `Tesla T4` x2、CUDA 12.8、driver 580.159.04、torch 2.10.0+cu128、`torch_cuda: true` |
+| C++（CPU）| ローカルの `.cpp` を送って `g++ 11.4` でビルド → 実行まで成功 |
+| **CUDA** | `.cu` を送って `nvcc -O2 -arch=sm_75` で **2.7 秒**ビルド → T4 で実行、誤差 0 |
+| `/job` | 切り離し起動 → 増分ログ取得 → 終了コード回収まで成功 |
+
+T4 は `sm_75`。GPU を使うには Notebook の Settings → Accelerator を GPU にしてから
+セッションを起こすこと（CPU セッションだと `nvidia-smi` が無く `gpus: []` が返る。
+これは異常ではなく、そのセッションに GPU が付いていないだけ）。
 
 ### 確認済みの事実（再調査しなくてよい）
 
@@ -44,47 +64,34 @@
 * mbedTLS を mingw でビルドするには `net_sockets.cpp` の `read/write/close` マクロを
   末尾で `#undef` する必要がある（`cpp/third_party/PATCHES.md`）。
 * MSVC は `/std:c++20` が要る（mbedTLS が指定初期化子を使っている）。
+* cpp-httplib の `WebSocketClient` は既定で 30 秒ごとにクライアント ping を投げるが、
+  Kaggle のプロキシ越しだとこれで接続が落ちることがあった。Jupyter のカーネル
+  チャンネルは ping を要求しないので `set_websocket_ping_interval(0)` で止めてある。
+  併せて「切れたら次の呼び出しで張り直す」処理を両実装に入れてある。
 
 ---
 
 ## 残作業
 
-### ⏭ 1. cpp 版の実装（最優先）
+### ⏭ 1. 車番認識の学習を実際に載せる（次の本命）
 
-`spec/API.md` を python 版と同じに実装する。土台（TLS・WSS・HTTP サーバ・JSON）は
-`ssl_smoke.cpp` で実証済みなので、残りは Jupyter プロトコルと REST の組み立てだけ。
+土台は通ったので、あとは中身。`_lpr_src` / `yolo_lpr_cpp` の学習コードを
 
-予定しているファイル:
-
-```
-cpp/pure/jurl.hpp      VSCode Compatible URL のパーサ（python/kbridge/jurl.py と同じ規則）
-cpp/pure/jupyter.hpp   REST + カーネル WebSocket（python/kbridge/jupyter.py と同じ手順）
-cpp/pure/ops.hpp       kbagent の注入と /sh /gpu /job（python/kbridge/ops.py と同じ生成コード）
-cpp/pure/batch.hpp     kaggle CLI 呼び出し
-cpp/kbridge_server.cpp cpp-httplib のローカルサーバ
-cpp/kbridge_cli.cpp    CLI（python -m kbridge.cli と同じサブコマンド）
+```sh
+python -m kbridge.cli sync <学習コードのディレクトリ> work/pure
+python -m kbridge.cli job start "cd /kaggle/working/work && nvcc -O2 -arch=sm_75 ... && ./train ..." --name lpr
+python -m kbridge.cli job log <id> --follow
+python -m kbridge.cli get work/best.ckpt ./best.ckpt
 ```
 
-**注入するコード文字列が python 版と一致していること**がパリティの肝。
-`kaggle/kbagent.py` を読んで base64 にして送る、という手順まで同じにする。
+の形に乗せる。詰まりそうなところ:
+* 学習データ（実車ナンバーの画像）の置き場所。Kaggle の Input（Dataset）に上げるのが本筋だが、
+  Input の追加は Kaggle UI からしかできない。小さいうちは `/upload` で送ってもよい。
+* 9 時間でセッションが切れる。`/job` なら切れてもプロセスは残るが、切れた後は
+  kbridge から見に行けないので、**チェックポイントをこまめに `/kaggle/working` へ書く**こと。
+* 無料枠は週 30 時間。回しっぱなしにしない。
 
-### ⏭ 2. パリティ試験 `tests/parity.py`
-
-両サーバを別ポートで起動し、同じリクエスト列を投げて `impl` 以外の JSON が一致することを見る。
-実行ごとに変わる値（`elapsed` `uptime` `kernel_id` `pid` `id` `started` `ended`
-`execution_count`）はキーの有無と型だけ比較する。
-
-### ⏭ 3. 本物の Kaggle での疎通確認
-
-ここまでは全部「偽 Jupyter サーバ」相手の結果で、**本物の Kaggle にはまだ 1 度も繋いでいない**。
-最初に確かめること:
-
-1. `connect` → `GET /gpu` で `Tesla T4` が出るか
-2. `run "nvcc --version"` が通るか
-3. `job start "nvcc -O2 x.cu -o x && ./x"` でビルドから実行まで通るか
-4. セッションが切れたあと `connect` し直してログを読み直せるか
-
-### ⏭ 4. あると嬉しい（優先度低）
+### ⏭ 2. あると嬉しい（優先度低）
 
 * `/exec` の `display_data` から画像（PNG）を取れるようにする（学習曲線の確認用）
 * `sync` の差分転送（今は毎回全部送る）

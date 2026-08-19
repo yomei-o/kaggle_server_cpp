@@ -17,7 +17,6 @@
 
 import argparse
 import base64
-import ctypes
 import hashlib
 import io
 import json
@@ -52,18 +51,29 @@ class Kernel:
         self.count = 0
         self.lock = threading.Lock()
         self.thread = None
+        self.running = False   # セル実行中だけ True
+        self.interrupts = 0    # 受けた割り込み要求の数（効かせはしない）
+        self._flag_lock = threading.Lock()
 
     def new_id(self):
         self.id = "fake-kernel-" + uuid.uuid4().hex[:8]
         return self.id
 
     def interrupt(self):
-        """実行中スレッドに KeyboardInterrupt を投げる（本物の挙動に寄せる）。"""
-        th = self.thread
-        if th is None or not th.is_alive():
-            return
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(th.ident), ctypes.py_object(KeyboardInterrupt))
+        """割り込み要求を受け付ける（記録するだけ）。
+
+        当初は ctypes で実行スレッドへ KeyboardInterrupt を投げていたが、
+        非同期例外は次のバイトコード境界でしか上がらないため time.sleep の途中では
+        効かず、セルが終わったあとに迷子の例外として飛んできて試験プロセスごと
+        落とすことがあった。本物のカーネルも C の中で止まっていれば割り込みは
+        すぐには効かないので、ここでは**効かない割り込み**を正として記録だけする。
+
+        呼ぶ側（kbridge）にとって大事なのは「割り込みを投げたあと status=timeout で
+        返ること」で、それはこれで十分試験できる。試験では sleep を短くしておき、
+        カーネルが自分で空くのを待つ。
+        """
+        with self._flag_lock:
+            self.interrupts += 1
 
 
 class _StreamOut(io.TextIOBase):
@@ -356,7 +366,11 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if (msg.get("header") or {}).get("msg_type") != "execute_request":
                 continue
-            self._execute(kernel, msg, send)
+            try:
+                self._execute(kernel, msg, send)
+            except BaseException as e:   # 迷子の KeyboardInterrupt を握りつぶす
+                if self.server.verbose:
+                    sys.stderr.write("[fake] stray %s in handler\n" % type(e).__name__)
 
     def _execute(self, kernel, msg, send):
         parent = msg["header"]
@@ -383,7 +397,9 @@ class Handler(BaseHTTPRequestHandler):
             err_out = _StreamOut(emit_stream, "stderr")
             old = sys.stdout, sys.stderr
             sys.stdout, sys.stderr = out, err_out
-            kernel.thread = threading.current_thread()
+            with kernel._flag_lock:
+                kernel.thread = threading.current_thread()
+                kernel.running = True
             status = "ok"
             einfo = {}
             try:
@@ -396,7 +412,9 @@ class Handler(BaseHTTPRequestHandler):
                 send(envelope("error", einfo))
             finally:
                 sys.stdout, sys.stderr = old
-                kernel.thread = None
+                with kernel._flag_lock:
+                    kernel.running = False
+                    kernel.thread = None
 
         reply = {"status": status, "execution_count": count,
                  "user_expressions": {}, "payload": []}
@@ -408,6 +426,15 @@ class Handler(BaseHTTPRequestHandler):
 class FakeJupyter(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        # クライアントが先に切っただけ（ストリーム中断など）は試験のノイズになる
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError,
+                            BrokenPipeError)):
+            return
+        if self.verbose:
+            traceback.print_exc()
 
     def __init__(self, addr, root, verbose=False):
         super().__init__(addr, Handler)

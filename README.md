@@ -25,6 +25,39 @@ Claude Code / curl / kbridge CLI
 
 ## 1. 使い始める（5 分）
 
+### 1.0 先に用意するもの（認証まわり）
+
+必要な資格情報は用途によって 2 つに分かれる。**主経路（Jupyter Server）に API トークンは要らない。**
+
+| したいこと | 要るもの | 取り方 |
+|---|---|---|
+| Jupyter Server 経由で実行（kbridge の主経路） | **API トークンは不要**。VSCode Compatible URL 自体に認証トークンが入っている | 1.1 の手順 |
+| バッチ投入（`/batch/*` = `kaggle kernels push`） | Kaggle API トークン | 下記 |
+
+前提: **GPU を使うにはアカウントの電話番号認証が要る**（未認証だと Notebook の
+Accelerator と Internet が選べない）。kaggle.com → 右上のアイコン → Settings → Phone verification。
+Notebook 右パネルの Settings → Accelerator で `GPU T4 x2` か `P100` を選ぶ。
+無料枠は **週 30 時間**、1 セッションは最長 9 時間（CPU のみなら 12 時間）。
+
+API トークンを取る（バッチを使うときだけ）:
+
+1. kaggle.com → 右上のアイコン → **Settings** → **API** → **Create New Token**
+2. 形式が 2 つある。**新形式（`KGAT_` で始まる）は環境変数でしか使えない**:
+
+```sh
+# 新形式
+export KAGGLE_API_TOKEN=KGAT_xxxxxxxxxxxxxxxxxxxx     # Windows: setx KAGGLE_API_TOKEN KGAT_...
+
+# 旧形式（kaggle.json がダウンロードされる場合）
+mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/
+chmod 600 ~/.kaggle/kaggle.json
+```
+
+3. 確認: `kaggle kernels list -m` が通れば OK（`pip install kaggle` が要る）。
+
+kbridge はトークンを読まないし保存もしない。`/batch/*` は PATH の `kaggle` コマンドを
+呼ぶだけなので、認証は CLI 側の作法にそのまま従う。
+
 ### 1.1 Kaggle 側でセッションを起こして URL をもらう
 
 1. Kaggle で Notebook を開く（GPU を使うなら Settings → Accelerator を GPU にする）
@@ -151,10 +184,16 @@ python -m kbridge.cli get work/best.ckpt ./best.ckpt
 喋る偽サーバなので、GPU 無料枠を 1 秒も使わずに全部通せる。
 
 ```sh
+sh tests/run_all.sh              # 下の 4 つを順に回す
+
 python tests/e2e.py              # python 版サーバを起動して 37 項目
 python tests/e2e.py --impl cpp   # cpp 版サーバで同じ 37 項目
-python tests/parity.py           # 両方を同時に起動して応答が一致するか
+python tests/parity.py           # 両サーバの応答が一致するか（29 項目）
+python tests/cli_parity.py       # 両 CLI の出力と終了コードが一致するか（11 項目）
 ```
+
+`tests/parity.py` は「カーネルへ送るコード文字列」も突き合わせる。ここが一致していれば、
+Kaggle 側の挙動は `kaggle/kbagent.py` 1 つに収束する（実測でバイト単位一致）。
 
 偽サーバを手で立てることもできる:
 

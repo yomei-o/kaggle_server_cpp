@@ -61,14 +61,19 @@ def _req(base, method, path, body=None, key=None, timeout=None, stream=False):
     return json.loads(payload.decode("utf-8")) if payload else {}
 
 
-def _out(obj):
+def _emit(obj):
+    """応答をそのまま JSON で出し、ok:false なら終了コード 1 を返す。
+
+    エラーも標準出力に JSON で出す（標準エラーへ流さない）。エージェントから
+    使うときに、成功も失敗も同じ形で拾えるほうが扱いやすいため。cpp 版 CLI も
+    同じ約束（tests/cli_parity.py が両方の出力と終了コードを突き合わせる）。
+    """
     print(json.dumps(obj, ensure_ascii=False, indent=2))
+    return 1 if isinstance(obj, dict) and obj.get("ok") is False else 0
 
 
-def _fail_if_not_ok(obj):
-    if isinstance(obj, dict) and obj.get("ok") is False:
-        raise CliError(obj.get("error") or json.dumps(obj, ensure_ascii=False))
-    return obj
+def _failed(obj):
+    return isinstance(obj, dict) and obj.get("ok") is False
 
 
 def _print_ndjson(resp, show_start=False):
@@ -117,22 +122,22 @@ def cmd_connect(a):
         body["url"] = a.url
     if a.new_kernel:
         body["new_kernel"] = True
-    r = _fail_if_not_ok(_req(a.base, "POST", "/session", body, a.api_key, timeout=120))
-    if a.url and a.save:
+    r = _req(a.base, "POST", "/session", body, a.api_key, timeout=120)
+    if a.url and a.save and not _failed(r):
         path = ".kbridge.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"url": a.url}, f, indent=2)
         # URL にはトークンが入っているので、うっかり公開しないよう念を押す
         print("saved %s (トークンを含む。.gitignore 済み)" % path, file=sys.stderr)
-    _out(r)
+    return _emit(r)
 
 
 def cmd_status(a):
-    _out(_req(a.base, "GET", "/healthz", key=a.api_key, timeout=30))
+    return _emit(_req(a.base, "GET", "/healthz", key=a.api_key, timeout=30))
 
 
 def cmd_gpu(a):
-    _out(_fail_if_not_ok(_req(a.base, "GET", "/gpu", key=a.api_key, timeout=300)))
+    return _emit(_req(a.base, "GET", "/gpu", key=a.api_key, timeout=300))
 
 
 def cmd_exec(a):
@@ -146,9 +151,8 @@ def cmd_exec(a):
         raise CliError("-c CODE か file を指定する")
     body = {"code": src, "timeout": a.timeout}
     if a.quiet:
-        r = _fail_if_not_ok(_req(a.base, "POST", "/exec", body, a.api_key,
-                                 timeout=a.timeout + 30))
-        _out(r)
+        r = _req(a.base, "POST", "/exec", body, a.api_key, timeout=a.timeout + 30)
+        _emit(r)
         return 0 if r.get("status") == "ok" else 1
     resp = _req(a.base, "POST", "/exec/stream", body, a.api_key,
                 timeout=a.timeout + 30, stream=True)
@@ -159,9 +163,8 @@ def cmd_exec(a):
 def cmd_run(a):
     body = {"cmd": a.cmd, "timeout": a.timeout, "cwd": a.cwd}
     if a.quiet:
-        r = _fail_if_not_ok(_req(a.base, "POST", "/sh", body, a.api_key,
-                                 timeout=a.timeout + 30))
-        _out(r)
+        r = _req(a.base, "POST", "/sh", body, a.api_key, timeout=a.timeout + 30)
+        _emit(r)
         return 0 if r.get("status") == "ok" else 1
     resp = _req(a.base, "POST", "/sh/stream", body, a.api_key,
                 timeout=a.timeout + 30, stream=True)
@@ -173,9 +176,9 @@ def cmd_run(a):
 
 
 def cmd_ls(a):
-    _out(_fail_if_not_ok(_req(a.base, "GET", "/ls?" +
+    return _emit(_req(a.base, "GET", "/ls?" +
                               urllib.parse.urlencode({"path": a.path}),
-                              key=a.api_key, timeout=120)))
+                              key=a.api_key, timeout=120))
 
 
 def cmd_put(a):
@@ -183,20 +186,22 @@ def cmd_put(a):
         data = f.read()
     remote = a.remote or os.path.basename(a.local)
     body = {"path": remote, "content_b64": base64.b64encode(data).decode("ascii")}
-    _out(_fail_if_not_ok(_req(a.base, "POST", "/upload", body, a.api_key, timeout=600)))
+    return _emit(_req(a.base, "POST", "/upload", body, a.api_key, timeout=600))
 
 
 def cmd_get(a):
-    r = _fail_if_not_ok(_req(a.base, "GET", "/download?" +
-                             urllib.parse.urlencode({"path": a.remote}),
-                             key=a.api_key, timeout=600))
+    r = _req(a.base, "GET", "/download?" +
+             urllib.parse.urlencode({"path": a.remote}), key=a.api_key, timeout=600)
+    if _failed(r):
+        return _emit(r)
     data = base64.b64decode(r["content_b64"])
     local = a.local or os.path.basename(a.remote)
     parent = os.path.dirname(os.path.abspath(local))
     os.makedirs(parent, exist_ok=True)
     with open(local, "wb") as f:
         f.write(data)
-    _out({"ok": True, "path": r["path"], "local": local, "size": len(data)})
+    return _emit({"ok": True, "path": r["path"], "local": local,
+                  "size": len(data)})
 
 
 def cmd_sync(a):
@@ -219,12 +224,14 @@ def cmd_sync(a):
                 data = f.read()
             body = {"path": remote,
                     "content_b64": base64.b64encode(data).decode("ascii")}
-            _fail_if_not_ok(_req(a.base, "POST", "/upload", body, a.api_key,
-                                 timeout=600))
+            r = _req(a.base, "POST", "/upload", body, a.api_key, timeout=600)
+            if _failed(r):
+                return _emit(r)
             sent.append(remote)
             total += len(data)
             print("sent %s (%d bytes)" % (remote, len(data)), file=sys.stderr)
-    _out({"ok": True, "files": len(sent), "bytes": total, "remote": a.remote})
+    return _emit({"ok": True, "files": len(sent), "bytes": total,
+                  "remote": a.remote})
 
 
 def cmd_job(a):
@@ -235,26 +242,27 @@ def cmd_job(a):
                             else open(a.what, encoding="utf-8").read())
         else:
             body["cmd"] = a.what
-        _out(_fail_if_not_ok(_req(a.base, "POST", "/job", body, a.api_key,
-                                  timeout=300)))
+        return _emit(_req(a.base, "POST", "/job", body, a.api_key,
+                                  timeout=300))
     elif a.job_cmd == "list":
-        _out(_fail_if_not_ok(_req(a.base, "GET", "/job", key=a.api_key, timeout=300)))
+        return _emit(_req(a.base, "GET", "/job", key=a.api_key, timeout=300))
     elif a.job_cmd == "status":
-        _out(_fail_if_not_ok(_req(a.base, "GET", "/job/" + a.id, key=a.api_key,
-                                  timeout=300)))
+        return _emit(_req(a.base, "GET", "/job/" + a.id, key=a.api_key,
+                                  timeout=300))
     elif a.job_cmd == "kill":
-        _out(_fail_if_not_ok(_req(a.base, "POST", "/job/%s/kill" % a.id, {},
-                                  a.api_key, timeout=300)))
+        return _emit(_req(a.base, "POST", "/job/%s/kill" % a.id, {},
+                                  a.api_key, timeout=300))
     elif a.job_cmd == "rm":
-        _out(_fail_if_not_ok(_req(a.base, "DELETE", "/job/" + a.id, key=a.api_key,
-                                  timeout=300)))
+        return _emit(_req(a.base, "DELETE", "/job/" + a.id, key=a.api_key,
+                                  timeout=300))
     elif a.job_cmd == "log":
         offset = a.offset
         while True:
             q = urllib.parse.urlencode({"offset": offset, "max": a.max_bytes})
-            r = _fail_if_not_ok(_req(a.base, "GET",
-                                     "/job/%s/log?%s" % (a.id, q),
-                                     key=a.api_key, timeout=300))
+            r = _req(a.base, "GET", "/job/%s/log?%s" % (a.id, q),
+                     key=a.api_key, timeout=300)
+            if _failed(r):
+                return _emit(r)
             if r.get("data"):
                 sys.stdout.write(r["data"])
                 sys.stdout.flush()
@@ -270,15 +278,15 @@ def cmd_job(a):
 
 def cmd_batch(a):
     if a.batch_cmd == "push":
-        _out(_req(a.base, "POST", "/batch/push", {"dir": a.dir}, a.api_key, timeout=900))
+        return _emit(_req(a.base, "POST", "/batch/push", {"dir": a.dir}, a.api_key, timeout=900))
     elif a.batch_cmd == "status":
-        _out(_req(a.base, "GET", "/batch/status?" + urllib.parse.urlencode({"id": a.id}),
+        return _emit(_req(a.base, "GET", "/batch/status?" + urllib.parse.urlencode({"id": a.id}),
                   key=a.api_key, timeout=600))
     elif a.batch_cmd == "output":
-        _out(_req(a.base, "POST", "/batch/output", {"id": a.id, "dir": a.dir},
+        return _emit(_req(a.base, "POST", "/batch/output", {"id": a.id, "dir": a.dir},
                   a.api_key, timeout=1800))
     elif a.batch_cmd == "pull":
-        _out(_req(a.base, "POST", "/batch/pull", {"id": a.id, "dir": a.dir},
+        return _emit(_req(a.base, "POST", "/batch/pull", {"id": a.id, "dir": a.dir},
                   a.api_key, timeout=900))
 
 

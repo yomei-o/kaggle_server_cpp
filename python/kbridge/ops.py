@@ -10,6 +10,7 @@ Kaggle 側の実体は kaggle/kbagent.py 1 ファイル。ここはそれを
 （生成するコード文字列が両実装で一致していることがパリティの肝）。
 """
 
+import base64
 import json
 import os
 
@@ -57,8 +58,7 @@ def agent_source():
 
 
 def inject_code():
-    import base64 as _b64
-    return _INJECT_TEMPLATE % _b64.b64encode(agent_source()).decode("ascii")
+    return _INJECT_TEMPLATE % base64.b64encode(agent_source()).decode("ascii")
 
 
 def ensure_agent(client, force=False):
@@ -81,19 +81,47 @@ def ensure_agent(client, force=False):
     return True
 
 
-def _call(client, expr, timeout=120.0):
+def args_b64(kwargs):
+    """引数を JSON にして base64 で運ぶ。
+
+    Python の repr でコードを組み立てると、C++ 版と同じ 1 行を作るのに
+    エスケープの流儀まで合わせる羽目になる。JSON なら両言語で同じ文字列になる
+    （キー順は sort、区切りは詰める — nlohmann の dump() と一致させるため）。
+    """
+    blob = json.dumps(kwargs, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+    return base64.b64encode(blob).decode("ascii")
+
+
+_CALL_TEMPLATE = (
+    "import json, base64\n"
+    "import kbagent\n"
+    "_a = json.loads(base64.b64decode('%s').decode('utf-8'))\n"
+    "print(json.dumps(kbagent.%s(**_a)))\n"
+)
+
+_SH_TEMPLATE = (
+    "import json, base64\n"
+    "import kbagent\n"
+    "_a = json.loads(base64.b64decode('%s').decode('utf-8'))\n"
+    "kbagent.sh(**_a)\n"
+)
+
+
+def call_code(func, kwargs):
+    return _CALL_TEMPLATE % (args_b64(kwargs), func)
+
+
+def _call(client, func, kwargs, timeout=120.0):
     """kbagent の関数を呼び、返り値の dict を受け取る。"""
     ensure_agent(client)
-    code = _PRELUDE + "import kbagent\nprint(json.dumps(kbagent.%s))\n" % expr
-    return client.execute_json(code, timeout=timeout)
+    return client.execute_json(call_code(func, kwargs), timeout=timeout)
 
 
 # ------------------------------------------------------------------ /sh
 
 def _sh_code(cmd, cwd, timeout):
-    ensure_arg = "None" if timeout is None else repr(float(timeout))
-    return _PRELUDE + ("import kbagent\nkbagent.sh(%r, cwd=%r, timeout=%s)\n"
-                       % (cmd, cwd, ensure_arg))
+    return _SH_TEMPLATE % args_b64({"cmd": cmd, "cwd": cwd, "timeout": timeout})
 
 
 def _split_marker(text):
@@ -178,7 +206,7 @@ class ShellStream:
 # ------------------------------------------------------------------ /gpu
 
 def gpu(client, timeout=120.0):
-    return _call(client, "gpu()", timeout=timeout)
+    return _call(client, "gpu", {}, timeout=timeout)
 
 
 # ------------------------------------------------------------------ /job
@@ -187,27 +215,28 @@ def job_start(client, cmd=None, code=None, name="job", cwd="/kaggle/working",
               env=None, timeout=120.0):
     if (cmd is None) == (code is None):
         raise ValueError("give exactly one of cmd or code")
-    expr = ("start(cmd=%r, code=%r, name=%r, cwd=%r, env=%r)"
-            % (cmd, code, name, cwd, env))
-    return _call(client, expr, timeout=timeout)
+    return _call(client, "start",
+                 {"cmd": cmd, "code": code, "name": name, "cwd": cwd, "env": env},
+                 timeout=timeout)
 
 
 def job_list(client, timeout=120.0):
-    return _call(client, "ls()", timeout=timeout)
+    return _call(client, "ls", {}, timeout=timeout)
 
 
 def job_status(client, job_id, timeout=120.0):
-    return _call(client, "status(%r)" % job_id, timeout=timeout)
+    return _call(client, "status", {"job_id": job_id}, timeout=timeout)
 
 
 def job_log(client, job_id, offset=0, max_bytes=65536, timeout=120.0):
-    return _call(client, "log(%r, offset=%d, max_bytes=%d)"
-                 % (job_id, int(offset), int(max_bytes)), timeout=timeout)
+    return _call(client, "log",
+                 {"job_id": job_id, "offset": int(offset),
+                  "max_bytes": int(max_bytes)}, timeout=timeout)
 
 
 def job_kill(client, job_id, timeout=120.0):
-    return _call(client, "kill(%r)" % job_id, timeout=timeout)
+    return _call(client, "kill", {"job_id": job_id}, timeout=timeout)
 
 
 def job_rm(client, job_id, timeout=120.0):
-    return _call(client, "rm(%r)" % job_id, timeout=timeout)
+    return _call(client, "rm", {"job_id": job_id}, timeout=timeout)

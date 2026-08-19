@@ -109,8 +109,10 @@ def run_tests(base, url, root, want_impl):
     s, r = req(base, "POST", "/exec", {"code": "import sys; print('e', file=sys.stderr)"})
     check("stderr が分かれている", s == 200 and r["stderr"].strip() == "e", r)
 
-    s, r = req(base, "POST", "/exec", {"code": "import time; time.sleep(30)",
-                                       "timeout": 2})
+    # 偽カーネルは割り込みを効かせない（本物も C の中では止まらない）ので、
+    # sleep は短くしておき、次の試験までにカーネルが自分で空くようにする。
+    s, r = req(base, "POST", "/exec", {"code": "import time; time.sleep(6)",
+                                       "timeout": 1})
     check("timeout で 504 と status=timeout", s == 504 and r["status"] == "timeout", r)
 
     s, r = req(base, "POST", "/exec", {})
