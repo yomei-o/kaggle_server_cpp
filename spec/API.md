@@ -1,7 +1,7 @@
 # spec/API.md — kbridge ローカルサーバ REST 仕様（v1）
 
 この文書が**正**。`python/`（FastAPI）と `cpp/`（cpp-httplib）は**同じ URL・同じ JSON・同じ挙動**を
-実装し、`tests/parity.sh` で差分ゼロを縛る。片方にしかない機能は作らない。
+実装し、`tests/parity.py` で差分ゼロを縛る。片方にしかない機能は作らない。
 
 ```
 Claude Code / curl / kbridge CLI
@@ -15,13 +15,15 @@ Claude Code / curl / kbridge CLI
 
 ## 0. 共通事項
 
-* すべてのレスポンスは `application/json; charset=utf-8`（例外: `GET /download?raw=1`）。
+* すべてのレスポンスは `application/json; charset=utf-8`（例外: `GET /download?raw=1` と
+  NDJSON ストリーム）。
 * すべてのレスポンスは最上位に `ok` (bool) を持つ。失敗時は `ok:false` と `error` (string) を持つ。
 * HTTP ステータス: 成功 200 / 引数不正 400 / セッション未確立 409 / 上流(Kaggle)エラー 502 /
   タイムアウト 504。`ok:false` の本文は必ず返す。
 * バインド既定は `127.0.0.1:8787`。`--api-key K` を付けた場合のみ `X-Bridge-Key: K` を必須にする。
 * パスは Kaggle 側 Jupyter の contents ルート（= `/kaggle/working`）からの相対。`..` は 400。
 * 時間の単位は秒 (float)。
+* トークンは**応答にもログにも出さない**（`base_url` は `****` でマスクして返す）。
 
 ## 1. セッション
 
@@ -36,20 +38,20 @@ Claude Code / curl / kbridge CLI
 {"url":"https://kkb-production.jupyter-proxy.kaggle.net/k/<id>/<token>/proxy"}
 ```
 * `url` 省略時は環境変数 `KAGGLE_JUPYTER_URL`、次に `.kbridge.json` の `url` を使う。
-* 既存カーネルがあれば再利用（`reuse:true`）、なければ `POST /api/sessions` で新規作成。
+* 既存カーネルがあれば再利用する（`reuse:true`）。Kaggle の GPU を握っているのは Notebook 本体の
+  カーネルなので、**再利用が既定**。`{"new_kernel":true}` で新規作成もできる。
 * 応答:
 ```json
-{"ok":true,"base_url":"https://.../k/<id>/<token>/proxy","kernel_id":"...",
+{"ok":true,"base_url":"https://.../k/<id>/****abcd/proxy","kernel_id":"...",
  "session_id":"...","kernel_name":"python3","reuse":false}
 ```
-* `token` は応答に**含めない**（ログにも出さない。マスクは `<id>` と末尾4文字のみ）。
 
 ### `GET /session`  … 現在の接続情報（未確立なら 409）
 ### `DELETE /session` … カーネルを shutdown して切断 `{"ok":true}`
 ### `POST /interrupt` … 実行中セルに割り込み `{"ok":true}`
 ### `POST /restart` … カーネル再起動 `{"ok":true,"kernel_id":"..."}`
 
-## 2. 実行
+## 2. 実行（対話・短時間向け）
 
 ### `POST /exec`
 ```json
@@ -66,22 +68,20 @@ Claude Code / curl / kbridge CLI
 ### `POST /exec/stream`
 本文は `/exec` と同じ。応答は `application/x-ndjson` の**チャンク転送**。1 行 1 JSON:
 ```
-{"t":"start","execution_count":null}
+{"t":"start"}
 {"t":"out","stream":"stdout","d":"Epoch 1 loss 12.5\n"}
 {"t":"out","stream":"stderr","d":"..."}
 {"t":"result","d":"<matplotlib...>"}
 {"t":"error","ename":"RuntimeError","evalue":"CUDA OOM","traceback":["..."]}
 {"t":"end","status":"ok","execution_count":3,"elapsed":812.4}
 ```
-`t:"end"` は必ず最後に 1 回だけ出る。学習ログの追跡はこれを使う。
+`t:"end"` は必ず最後に 1 回だけ出る。
 
 ### `POST /sh`
 ```json
 {"cmd":"nvcc --version","timeout":300,"cwd":"/kaggle/working"}
 ```
-シェル実行。応答は `/exec` と同形＋ `"exit_code":0`。
-実体は `subprocess` 相当のコードをカーネルへ送るので、終了コードが正しく取れる。
-ストリーミング版は `POST /sh/stream`（NDJSON、`/exec/stream` と同形式）。
+シェル実行。応答は `/exec` と同形＋ `"exit_code":0`。ストリーミング版は `POST /sh/stream`。
 
 ### `GET /gpu`
 ```json
@@ -112,17 +112,53 @@ GPU が無い（CPU セッション）場合は `gpus:[]`, `ok:true`。
 ```
 ### `POST /mkdir` `{"path":"src"}` / `POST /rm` `{"path":"src/train.cpp"}`
 
-## 4. バッチ（kaggle CLI フォールバック）
+## 4. ジョブ（長時間学習向け・**学習はこれを使う**）
 
-Jupyter セッションは対話向けで、長時間学習（9〜12h）は `kaggle kernels push` のバッチが向く。
-`kaggle` CLI が PATH に無い場合は `ok:false, error:"kaggle CLI not found"`。
+`/exec` は HTTP 接続を張ったまま待つので、9〜12 時間の学習には向かない（ローカルの再起動・
+回線断・エージェントの再起動で結果を失う）。ジョブ API は Kaggle 側でプロセスを**切り離して**
+起動し、ログをファイルに落とす。呼ぶ側は好きなときに増分だけ読みにいけばよい。
+
+実体は Kaggle 側に置くヘルパ `kaggle/kbjob.py`（このリポジトリのファイルをそのまま
+`/kaggle/working/.kbridge/kbjob.py` にアップロードして使う）。python 版と cpp 版はどちらも
+**同じ kbjob.py** を使うので、ジョブの意味論は 1 か所にしかない。
+
+### `POST /job`
+```json
+{"cmd":"nvcc -O2 train.cu -o train && ./train --epochs 50","name":"lpr-train","cwd":"/kaggle/working"}
+```
+* `cmd`（シェル）か `code`（Python）のどちらか一方。
+* 応答: `{"ok":true,"id":"20260819-114500-lpr-train","pid":1234,"log":".kbridge/jobs/<id>.log"}`
+
+### `GET /job` … 一覧
+```json
+{"ok":true,"jobs":[{"id":"...","name":"lpr-train","state":"running","pid":1234,
+                    "started":1755600000.0,"ended":null,"exit_code":null,"log_size":81920}]}
+```
+`state` は `running` / `done` / `failed` / `killed` / `lost`（プロセスが消えたが終了コード未記録）。
+
+### `GET /job/{id}` … 単体（上と同じ 1 件）
+### `GET /job/{id}/log?offset=N&max=M`
+```json
+{"ok":true,"id":"...","offset":81920,"next_offset":90112,"eof":false,
+ "state":"running","data":"Epoch 12 loss 3.21\n..."}
+```
+* `offset` 既定 0、`max` 既定 65536。`data` は UTF-8 文字列（不正バイトは置換）。
+* 学習の追跡は「`next_offset` を持って定期的に叩き直す」だけでよい。
+### `POST /job/{id}/kill` … プロセスグループごと停止 `{"ok":true,"state":"killed"}`
+
+## 5. バッチ（kaggle CLI フォールバック）
+
+Jupyter セッションは対話向けで、セッションが切れると実行も止まる。確実に 9〜12 時間回したい
+場合は `kaggle kernels push` のバッチが向く。`kaggle` CLI が PATH に無い場合は
+`ok:false, error:"kaggle CLI not found"` を返す（HTTP 200）。
 
 * `POST /batch/push`   `{"dir":"notebooks/lpr"}` → `kaggle kernels push -p <dir>`
-* `GET  /batch/status?id=user/kernel` → `{"ok":true,"status":"running"|"complete"|"error","raw":"..."}`
+* `GET  /batch/status?id=user/kernel` → `{"ok":true,"state":"running"|"complete"|"error","raw":"..."}`
 * `POST /batch/output` `{"id":"user/kernel","dir":"downloads/lpr"}` → 出力一式を取得
 
-## 5. パリティ規約
+## 6. パリティ規約
 
-`tests/parity.sh` は python 版と cpp 版を別ポートで起動し、同じリクエスト列を投げて
-**`impl` フィールドを除く JSON が完全一致**することを確認する。数値の揺れる
-`elapsed` / `uptime` / `execution_count` / `kernel_id` / `session_id` はキーの有無と型のみ比較する。
+`tests/parity.py` は python 版と cpp 版を別ポートで起動し、同じリクエスト列を投げて
+**`impl` フィールドを除く JSON が完全一致**することを確認する。実行ごとに変わる
+`elapsed` / `uptime` / `execution_count` / `kernel_id` / `session_id` / `pid` / `id` /
+`started` / `ended` はキーの有無と型だけ比較する。

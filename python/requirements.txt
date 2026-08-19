@@ -1,0 +1,5 @@
+# kbridge (python 版) の依存。WebSocket クライアントは自前実装なので入れない。
+fastapi>=0.110
+uvicorn>=0.27
+# バッチ実行 (/batch/*) を使うときだけ必要（PATH の kaggle コマンドを呼ぶだけ）
+# kaggle>=1.6
