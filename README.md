@@ -23,6 +23,9 @@ Claude Code / curl / kbridge CLI
 
 現在の状態と残作業は [RESUME.md](RESUME.md)。
 
+**AI エージェントに読ませるなら → [FOR_AGENTS.md](FOR_AGENTS.md)**（人間が URL を 1 つ渡すだけで、
+エージェントが `curl` だけで T4 を使えるようになるまでの最短手順。実測値と落とし穴つき）。
+
 ---
 
 ## 1. 使い始める（5 分）
