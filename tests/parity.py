@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -109,15 +110,31 @@ def compare(name, fn):
 IMPLS = []
 
 
+def clean_env(workdir):
+    """本物の Kaggle を掴まないようにした環境を作る。
+
+    リポジトリ直下に .kbridge.json（実セッションの URL）が置いてあると、
+    そこを cwd にした側だけが起動時に自動接続してしまい、/healthz の
+    connected が食い違う。両実装とも「何も無い作業ディレクトリ」で起動させる。
+    """
+    env = dict(os.environ)
+    env.pop("KAGGLE_JUPYTER_URL", None)
+    env["HOME"] = workdir
+    env["USERPROFILE"] = workdir
+    return env
+
+
 def start_impl(name, port, fake_port, exe, verbose):
     srv, url, root = fake_jupyter.serve(fake_port)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = "http://127.0.0.1:%d" % port
+    workdir = tempfile.mkdtemp(prefix="kbparity-")
+    env = clean_env(workdir)
     if name == "python":
-        env = dict(os.environ, PYTHONPATH=os.path.join(ROOT, "python"))
+        env["PYTHONPATH"] = os.path.join(ROOT, "python")
         proc = subprocess.Popen(
             [sys.executable, "-m", "kbridge.server", "--port", str(port)],
-            cwd=os.path.join(ROOT, "python"), env=env,
+            cwd=workdir, env=env,
             stdout=subprocess.DEVNULL if not verbose else None)
     else:
         path = exe if os.path.isabs(exe) else os.path.join(ROOT, exe)
@@ -125,8 +142,11 @@ def start_impl(name, port, fake_port, exe, verbose):
             raise SystemExit("no such exe: %s  "
                              "(sh cpp/build/gcc.sh cpp/kbridge_server.cpp "
                              "-o kbridge_server.exe)" % path)
-        proc = subprocess.Popen([path, "--port", str(port)], cwd=ROOT,
-                                stdout=subprocess.DEVNULL if not verbose else None)
+        proc = subprocess.Popen(
+            [path, "--port", str(port),
+             "--agent", os.path.join(ROOT, "kaggle", "kbagent.py")],
+            cwd=workdir, env=env,
+            stdout=subprocess.DEVNULL if not verbose else None)
     if not wait_up(base):
         proc.terminate()
         raise SystemExit("%s server did not come up on %s" % (name, base))

@@ -48,6 +48,8 @@ Claude Code / curl / kbridge CLI
 
 ### `GET /session`  … 現在の接続情報（未確立なら 409）
 ### `DELETE /session` … カーネルを shutdown して切断 `{"ok":true}`
+既定では Notebook 本体のカーネルを再利用しているため、これは **その Notebook の
+実行状態を消す**。ブリッジを止めたいだけならサーバを終了すればよい。
 ### `POST /interrupt` … 実行中セルに割り込み `{"ok":true}`
 ### `POST /restart` … カーネル再起動 `{"ok":true,"kernel_id":"..."}`
 

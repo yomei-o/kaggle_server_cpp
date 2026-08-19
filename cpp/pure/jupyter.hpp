@@ -176,13 +176,31 @@ class JupyterClient {
 
   void disconnect() {
     stop_ = true;
+    std::shared_ptr<httplib::ws::WebSocketClient> ws;
     {
       std::lock_guard<std::mutex> lock(ws_mutex_);
-      if (ws_) { ws_->close(); }
+      ws = ws_;
+      ws_.reset();
     }
-    if (reader_.joinable()) { reader_.join(); }
-    std::lock_guard<std::mutex> lock(ws_mutex_);
-    ws_.reset();
+    if (ws) { ws->close(); }
+    reap_reader();
+  }
+
+  // リーダスレッドを畳む。close フレームを送っても相手が TCP を閉じてくれない
+  // 場合、read() は読み取りタイムアウトまで返ってこない。そこで無限に待つと
+  // ブリッジ全体が止まるので、少しだけ待って駄目なら手放す。リーダは自分で
+  // shared_ptr を持っているので、後から安全に終われる。
+  void reap_reader() {
+    if (!reader_.joinable()) { return; }
+    std::unique_lock<std::mutex> lock(done_mutex_);
+    bool done = done_cv_.wait_for(lock, std::chrono::seconds(10),
+                                  [this] { return reader_done_.load(); });
+    lock.unlock();
+    if (done) {
+      reader_.join();
+    } else {
+      reader_.detach();
+    }
   }
 
   void shutdown() {
@@ -589,6 +607,11 @@ class JupyterClient {
   }
 
   void connect_ws() {
+    {
+      std::lock_guard<std::mutex> lock(ws_mutex_);
+      if (ws_) { return; }
+    }
+    reap_reader();   // ロックを持たずに畳む
     std::lock_guard<std::mutex> lock(ws_mutex_);
     if (ws_) { return; }
     httplib::Headers h{{"Origin", origin_},
@@ -598,7 +621,7 @@ class JupyterClient {
     auto c = cookie_header();
     if (!c.empty()) { h.emplace("Cookie", c); }
 
-    auto ws = std::make_unique<httplib::ws::WebSocketClient>(ws_url(), h);
+    auto ws = std::make_shared<httplib::ws::WebSocketClient>(ws_url(), h);
     ws->set_connection_timeout(30, 0);
     // Jupyter のカーネルチャンネルはクライアントからの ping を必要としない。
     // 既定のまま 30 秒ごとに ping を投げると Kaggle のプロキシ越しで接続が
@@ -612,22 +635,16 @@ class JupyterClient {
     if (!ws->connect()) {
       throw JupyterError("websocket connect failed: " + mask_base(ws_url(), token_));
     }
-    ws_ = std::move(ws);
+    ws_ = ws;
     ws_error_.clear();
     stop_ = false;
-    if (reader_.joinable()) { reader_.join(); }
-    reader_ = std::thread([this] { reader_loop(); });
+    reader_done_ = false;
+    reader_ = std::thread([this, ws] { reader_loop(ws); });
   }
 
-  void reader_loop() {
+  void reader_loop(std::shared_ptr<httplib::ws::WebSocketClient> ws) {
     std::string msg;
     while (!stop_) {
-      httplib::ws::WebSocketClient *ws = nullptr;
-      {
-        std::lock_guard<std::mutex> lock(ws_mutex_);
-        ws = ws_.get();
-      }
-      if (!ws) { break; }
       auto rr = ws->read(msg);
       if (rr == httplib::ws::Fail) {
         if (!stop_) { ws_error_ = "websocket closed"; }
@@ -654,14 +671,18 @@ class JupyterClient {
     //  "websocket not connected" を返し続ける）。
     {
       std::lock_guard<std::mutex> lock(ws_mutex_);
-      if (!stop_ && ws_) {
-        ws_->close();
-        ws_.reset();
-      }
+      if (ws_ == ws) { ws_.reset(); }
     }
     // 待っている実行を起こす
-    std::lock_guard<std::mutex> lock(subs_mutex_);
-    for (auto &kv : subs_) { kv.second->close(); }
+    {
+      std::lock_guard<std::mutex> lock(subs_mutex_);
+      for (auto &kv : subs_) { kv.second->close(); }
+    }
+    {
+      std::lock_guard<std::mutex> lock(done_mutex_);
+      reader_done_ = true;
+    }
+    done_cv_.notify_all();
   }
 
   // ---------------------------------------------------------------- utils
@@ -691,10 +712,13 @@ class JupyterClient {
   std::string xsrf_;
   std::map<std::string, std::string> cookies_;
 
-  std::unique_ptr<httplib::ws::WebSocketClient> ws_;
+  std::shared_ptr<httplib::ws::WebSocketClient> ws_;
   std::mutex ws_mutex_;
   std::thread reader_;
   std::atomic<bool> stop_{false};
+  std::atomic<bool> reader_done_{true};
+  std::mutex done_mutex_;
+  std::condition_variable done_cv_;
   std::string ws_error_;
 
   std::map<std::string, std::shared_ptr<Chan>> subs_;

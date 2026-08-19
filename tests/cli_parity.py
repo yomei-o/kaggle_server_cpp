@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -19,7 +20,7 @@ sys.path.insert(0, HERE)
 
 import fake_jupyter  # noqa: E402
 from e2e import wait_up  # noqa: E402
-from parity import diff, normalize  # noqa: E402
+from parity import clean_env, diff, normalize  # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -77,8 +78,12 @@ def main():
     if not os.path.exists(exe):
         raise SystemExit("no kbridge_server.exe; sh cpp/build/gcc.sh "
                          "cpp/kbridge_server.cpp -o kbridge_server.exe")
-    proc = subprocess.Popen([exe, "--port", str(a.port)], cwd=ROOT,
-                            stdout=subprocess.DEVNULL)
+    # 実 Kaggle の .kbridge.json を掴まないよう、空の作業ディレクトリで起動する
+    workdir = tempfile.mkdtemp(prefix="kbcli-")
+    proc = subprocess.Popen(
+        [exe, "--port", str(a.port),
+         "--agent", os.path.join(ROOT, "kaggle", "kbagent.py")],
+        cwd=workdir, env=clean_env(workdir), stdout=subprocess.DEVNULL)
     try:
         if not wait_up(base):
             raise SystemExit("server did not come up")

@@ -372,6 +372,19 @@ class Handler(BaseHTTPRequestHandler):
                 if self.server.verbose:
                     sys.stderr.write("[fake] stray %s in handler\n" % type(e).__name__)
 
+        # 本物のサーバと同じく、WebSocket が終わったら接続そのものを閉じる。
+        # ここで閉じないと、close フレームを送った側の read がいつまでも返らず、
+        # 切断処理が固まる（実際に cpp 版の DELETE /session がそれで詰まった）。
+        self.close_connection = True
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            conn.close()
+        except OSError:
+            pass
+
     def _execute(self, kernel, msg, send):
         parent = msg["header"]
         code = (msg.get("content") or {}).get("code", "")

@@ -216,7 +216,17 @@ static std::string default_url() {
   if (const char *env = std::getenv("KAGGLE_JUPYTER_URL")) {
     if (*env) { return env; }
   }
-  for (const char *path : {".kbridge.json"}) {
+  // python 版 (python/kbridge/server.py の default_url) と同じ順で同じ場所を見る
+  std::vector<std::string> paths{".kbridge.json"};
+  for (const char *home : {"USERPROFILE", "HOME"}) {
+    if (const char *h = std::getenv(home)) {
+      if (*h) {
+        paths.push_back(std::string(h) + "/.kbridge.json");
+        break;
+      }
+    }
+  }
+  for (const auto &path : paths) {
     std::ifstream f(path, std::ios::binary);
     if (!f.good()) { continue; }
     std::string body((std::istreambuf_iterator<char>(f)),

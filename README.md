@@ -207,6 +207,10 @@ python tests/fake_jupyter.py --port 8899
 ## 5. 気をつけること
 
 * **URL は認証情報**。`.kbridge.json` は `.gitignore` 済み。ログや issue に貼らない。
+* **`DELETE /session` は Kaggle 側のカーネルを落とす。** 既定では Notebook 本体の
+  カーネルを再利用しているので、これを叩くと**その Notebook の実行状態（読み込んだ
+  データやメモリ上の変数）が消える**。単に kbridge を止めたいだけならサーバを終了すれば
+  よく、`DELETE /session` を叩く必要はない。
 * サーバは既定で `127.0.0.1` にしか bind しない。それ以外に出すなら `--api-key K` を付けて
   `X-Bridge-Key` を必須にする。
 * Kaggle のセッションはブラウザのタブを閉じると止まることがある。`/job` で切り離してあれば
