@@ -120,9 +120,11 @@ GPU が無い（CPU セッション）場合は `gpus:[]`, `ok:true`。
 回線断・エージェントの再起動で結果を失う）。ジョブ API は Kaggle 側でプロセスを**切り離して**
 起動し、ログをファイルに落とす。呼ぶ側は好きなときに増分だけ読みにいけばよい。
 
-実体は Kaggle 側に置くヘルパ `kaggle/kbjob.py`（このリポジトリのファイルをそのまま
-`/kaggle/working/.kbridge/kbjob.py` にアップロードして使う）。python 版と cpp 版はどちらも
-**同じ kbjob.py** を使うので、ジョブの意味論は 1 か所にしかない。
+実体は Kaggle 側で動くヘルパ `kaggle/kbagent.py`。ローカルサーバはこれを**ファイルとして
+置かず、カーネルの `sys.modules` へ直接注入して**呼ぶ（置き場所が環境で変わらないため）。
+python 版と cpp 版はどちらも同じファイルを同じ手順で注入する。注入・呼び出しに使う
+コード文字列は**両実装でバイト単位に一致**しており、`tests/parity.py` がそれを縛っている。
+そのため、ジョブ・シェル・GPU 判定の意味論は `kbagent.py` 1 か所にしかない。
 
 ### `POST /job`
 ```json
@@ -147,6 +149,7 @@ GPU が無い（CPU セッション）場合は `gpus:[]`, `ok:true`。
 * `offset` 既定 0、`max` 既定 65536。`data` は UTF-8 文字列（不正バイトは置換）。
 * 学習の追跡は「`next_offset` を持って定期的に叩き直す」だけでよい。
 ### `POST /job/{id}/kill` … プロセスグループごと停止 `{"ok":true,"state":"killed"}`
+### `DELETE /job/{id}` … 終わったジョブのメタ・ログを消す（実行中なら 502）
 
 ## 5. バッチ（kaggle CLI フォールバック）
 
@@ -157,6 +160,8 @@ Jupyter セッションは対話向けで、セッションが切れると実行
 * `POST /batch/push`   `{"dir":"notebooks/lpr"}` → `kaggle kernels push -p <dir>`
 * `GET  /batch/status?id=user/kernel` → `{"ok":true,"state":"running"|"complete"|"error","raw":"..."}`
 * `POST /batch/output` `{"id":"user/kernel","dir":"downloads/lpr"}` → 出力一式を取得
+* `POST /batch/pull`   `{"id":"user/kernel","dir":"local/lpr"}` → コードと metadata を取得し、
+  `kernel-metadata.json` に `run_on_push: false` を書き込む（push のたびに勝手に実行させない）
 
 ## 6. パリティ規約
 
@@ -164,3 +169,7 @@ Jupyter セッションは対話向けで、セッションが切れると実行
 **`impl` フィールドを除く JSON が完全一致**することを確認する。実行ごとに変わる
 `elapsed` / `uptime` / `execution_count` / `kernel_id` / `session_id` / `pid` / `id` /
 `started` / `ended` はキーの有無と型だけ比較する。
+
+`tests/cli_parity.py` は同じことを CLI に対してやる（標準出力と終了コードの一致）。
+両 CLI とも、失敗も `ok:false` の JSON として**標準出力**に出し、終了コード 1 を返す
+（エラーだけ標準エラーに逃がさない。エージェントから使うとき成功と失敗を同じ形で拾えるように）。
