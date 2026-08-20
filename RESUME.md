@@ -1,6 +1,6 @@
 # RESUME — kbridge の実装状況と残作業
 
-最終更新: 2026-08-19（本物の Kaggle T4 x2 で疎通確認済み）
+最終更新: 2026-08-20（本物の Kaggle T4 x2 で疎通確認済み。keep-alive も実機で決着）
 
 使い方は [README.md](README.md)、REST 仕様は [spec/API.md](spec/API.md)（こちらが正）。
 
@@ -22,6 +22,7 @@
 | 2 実装のパリティ | ✅ 29/29 | ✅ | 生成コードはバイト単位で一致 |
 | CLI のパリティ | ✅ 11/11 | ✅ | 出力と終了コードが一致 |
 | TLS(mbedTLS) + WSS の土台 | — | ✅ 6/6 | mingw / MSVC 両方 |
+| keep-alive（アイドル維持） | ✅ | ✅ | 実機で 57.5 分の放置に耐えた（下記） |
 | **本物の Kaggle GPU での実行** | ✅ | ✅ | 下記 |
 
 ✅ = 動作確認済み、— = 対象外
@@ -38,6 +39,7 @@
 | C++（CPU）| ローカルの `.cpp` を送って `g++ 11.4` でビルド → 実行まで成功 |
 | **CUDA** | `.cu` を送って `nvcc -O2 -arch=sm_75` で **2.7 秒**ビルド → T4 で実行、誤差 0 |
 | `/job` | 切り離し起動 → 増分ログ取得 → 終了コード回収まで成功 |
+| keep-alive（2026-08-20） | `pass` だけで 57.5 分アイドルを生存。カーネル pid も VM も同一 |
 
 T4 は `sm_75`。GPU を使うには Notebook の Settings → Accelerator を GPU にしてから
 セッションを起こすこと（CPU セッションだと `nvidia-smi` が無く `gpus: []` が返る。
@@ -75,19 +77,35 @@ T4 は `sm_75`。GPU を使うには Notebook の Settings → Accelerator を G
 
 ---
 
-## keep-alive の状態（2026-08-20）
+## keep-alive の状態（2026-08-20 実機で決着）
 
 `--keepalive SECONDS`（既定 240、0 で無効）を両実装に入れた。アイドルが続いたら
 カーネルへ `pass` を 1 セル投げるだけの常駐スレッド。`tests/keepalive.py` が
 両実装で 6/6（偽 Jupyter 相手、間隔 2 秒で発火と非発火を見る）。
 
-**未検証: 本物の Kaggle で 40 分放置して生き残るか。** カーネル活動が Kaggle の
-idle タイマを戻すかどうかがまだ分かっていない。これを 1 回測れば、以下のどちらに
-進むかが決まる（詳細は README の「keep-alive の効き方」）:
+**効いた。カーネル活動だけで Kaggle の idle 回収を避けられる。** 2026-08-20 に
+本物の T4 x2 セッション（`GET /gpu` = Tesla T4 x2 / CUDA 12.8 / torch 2.10.0+cu128）で
+測った。ブラウザのタブは閉じ、kbridge の `pass` 以外は 1 バイトも流していない。
 
-* 効いた → これで終わり。
-* 効かない → Kaggle の活動判定は `www.kaggle.com` 側を見ている。`/batch`（Commit は
-  idle タイマ無し）へ寄せる、またはブラウザ側 userscript を併用する。
+| 見たもの | 基準 11:35:46 UTC | 57.5 分後 12:33:16 UTC |
+|---|---|---|
+| セッション | connected（kernel `bf462b3e…`） | connected（同じ kernel id） |
+| カーネル pid / `/proc/<pid>/stat` の starttime | 58 / 41794 | **58 / 41794**（プロセス再起動なし） |
+| ホスト名 | `74f6b292222e` | 同一（VM の入れ替えなし） |
+| VM uptime | 674 s | 4125 s（差が経過時間と一致） |
+| 名前空間に置いた `KB_MARK` | 設定 | **生存** |
+| `execution_count` | 1 | 19（keep-alive の発火数と帳尻が合う） |
+
+発火は python 版 11 回（240〜241 秒間隔）+ cpp 版 2 回、**全部 `ok`**。WebSocket の
+切断・張り直しは一度も起きなかった。python 版で 46 分放置 → 同じセッションへ cpp 版で
+つなぎ替えて 11 分、という順で測ったので、両実装とも実機で発火を確認している。
+
+つまり「効かない → `/batch` かブラウザ userscript へ寄せる」という分岐は**不要**。
+長時間の学習は素直に `/job` + keep-alive で回せる。
+
+留保: 対照（`--keepalive 0` で放置して死ぬのを見る）は測っていないので、
+「idle タイマがそもそも 57 分より長い」可能性は原理的には残る。README の実測
+30 分前後という前提の下では、57.5 分の生存はそれを超えている。
 
 派生して確認したいこと: セッション回収時に `/kaggle/working` が消えるので、
 Notebook の Settings → Persistence を有効にしておく必要がある。

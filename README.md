@@ -229,19 +229,33 @@ python -m kbridge.server --port 8787 --keepalive 0  # 無効
 WebSocket のプロトコル ping では代用できない（Kaggle のプロキシ手前で終わるので上流の
 帳簿に効かない。そもそも既定の 30 秒 ping は接続を落とすので切ってある）。
 
-### keep-alive の効き方 — まだ検証していない
+### keep-alive の効き方 — 実機で効いた（2026-08-20）
 
-**カーネル活動だけで Kaggle の idle タイマが戻るかは未確認。** 偽 Jupyter 相手に
-「アイドルが続けば execute_request が飛ぶ」ことは `tests/keepalive.py` で確認済みだが、
-本物で 40 分放置して生き残るかは測っていない。効かなかった場合の次の手は 2 つ:
+**カーネル活動だけで Kaggle の idle 回収を避けられる。** 本物の T4 x2 セッションで
+**ブラウザのタブを閉じたまま 57.5 分**放置し、kbridge の `pass` 以外は 1 バイトも
+流さずに生き残った。発火は python 版 11 回（240〜241 秒間隔）+ cpp 版 2 回、全部 `ok`。
 
-* 既知の回避策は[ブラウザ側の DOM クリック](https://greasyfork.org/en/scripts/504382-keep-kaggle-notebook-alive/code)
-  で、4〜6 分ごとに Add cell → Run current cell → Cut cell を押す。セル実行だけでなく
-  **ノートブック文書の更新**も一緒にやっているのが引っかかる点。Kaggle の活動判定が
-  `www.kaggle.com` 側（ログイン Cookie が必要な経路）を見ているなら、jupyter-proxy
-  越しの実行では届かない。
+生き残ったことの裏取りは「まだ繋がる」だけでは足りないので、カーネルの同一性まで見た:
+
+| 見たもの | 基準 | 57.5 分後 |
+|---|---|---|
+| カーネル pid / `/proc/<pid>/stat` の starttime | 58 / 41794 | 58 / 41794（再起動なし） |
+| ホスト名 / VM uptime | `74f6b292222e` / 674 s | 同一 / 4125 s（差が経過時間と一致） |
+| 名前空間に置いた変数 | 設定 | 生存 |
+| `execution_count` | 1 | 19（keep-alive の発火数と帳尻が合う） |
+
+つまり Kaggle の活動判定は jupyter-proxy 越しのセル実行でも届く。下記 2 つの
+回避策は**要らない**（効かなかった場合の手として調べてあったもの。記録として残す）:
+
+* [ブラウザ側の DOM クリック](https://greasyfork.org/en/scripts/504382-keep-kaggle-notebook-alive/code)
+  で、4〜6 分ごとに Add cell → Run current cell → Cut cell を押す。既定 240 秒は
+  この間隔（4〜6 分）に合わせてある。
 * [Commit（Save & Run All）には idle タイマが無い](https://www.kaggle.com/general/232625)。
-  ブラウザを閉じても走る。数時間の計算はこちらが本筋で、`/batch/push` がその入口。
+  ブラウザを閉じても走る。9 時間を超える計算はこちらが本筋で、`/batch/push` がその入口。
+
+留保: 対照（`--keepalive 0` で放置して死ぬのを見る）は測っていない。よって
+「idle タイマがそもそも 57 分より長い」可能性は原理的には残る（実測 30 分前後という
+前提の下では、57.5 分の生存はそれを超えている）。
 
 あわせて確認すべき落とし穴: セッションが回収されると `/kaggle/working` の中身も消える。
 Notebook の Settings → **Persistence** を有効にしていないと、こまめに書いた
