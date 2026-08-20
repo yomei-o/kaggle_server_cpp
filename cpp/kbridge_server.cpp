@@ -42,6 +42,86 @@ struct State {
   bool insecure = false;
 } g;
 
+// ---------------------------------------------------------------- keep-alive
+//
+// Kaggle の interactive セッションには idle タイマがある（実測 30 分前後。
+// 公式値は 20 分 / 40 分 / 1 時間と報告がばらつく）。/job で切り離した学習を
+// 回している間、呼ぶ側がログを見に来なければ Kaggle へは 1 バイトも流れず、
+// そのままセッションを回収される。
+//
+// ここでは「最後にカーネルへ話しかけてから interval 秒経ったら `pass` を 1 セル
+// 実行する」だけをやる。WebSocket のプロトコル ping では駄目で（Kaggle の
+// プロキシ手前で終わるので上流の帳簿に効かない）、実際の execute_request が要る。
+//
+// カーネル活動だけで Kaggle の idle タイマが戻るかは**未確定**。既知の回避策は
+// ブラウザ側の DOM クリックで、あれはノートブック文書の更新も一緒にやっている。
+// 40 分放置して生き残るかを 1 回測れば決着する。既定 240 秒はその回避策の間隔
+// （4〜6 分）に合わせた。python 版 server.py の KeepAlive と同じ挙動にすること。
+
+static const double KEEPALIVE_DEFAULT = 240.0;
+
+class KeepAlive {
+ public:
+  double interval = KEEPALIVE_DEFAULT;
+
+  void start() {
+    if (interval <= 0 || thread_.joinable()) { return; }
+    stop_ = false;
+    thread_ = std::thread([this] { loop(); });
+  }
+
+  void stop() {
+    stop_ = true;
+    if (thread_.joinable()) { thread_.join(); }
+  }
+
+ private:
+  std::atomic<bool> stop_{false};
+  std::thread thread_;
+  long count_ = 0;
+
+  void loop() {
+    // 停止要求に素早く応じるため、待ちは細かく刻む。
+    const double step = std::min(1.0, interval);
+    while (!stop_) {
+      auto until = std::chrono::steady_clock::now() +
+                   std::chrono::milliseconds((long long)(step * 1000));
+      while (!stop_ && std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      if (stop_) { break; }
+      try {
+        tick();
+      } catch (const std::exception &) {
+        // スレッドは絶対に落とさない
+      }
+    }
+  }
+
+  void tick() {
+    if (!g.client || !g.client->has_kernel()) { return; }
+    double idle = kbridge::now_seconds() - g.client->last_activity.load();
+    if (idle < interval) { return; }
+    // 進行中の実行が居るなら、それ自体が活動なので譲る。長い /exec の
+    // 後ろに待ち行列を作らないよう、待たずに諦める。
+    if (!g.lock.try_lock()) { return; }
+    std::string status;
+    try {
+      status = g.client->execute("pass", 30.0).status;
+    } catch (...) {
+      g.lock.unlock();
+      throw;
+    }
+    g.lock.unlock();
+    ++count_;
+    std::printf("keepalive #%ld after %.0fs idle: %s\n", count_, idle,
+                status.c_str());
+    std::fflush(stdout);
+  }
+};
+
+static KeepAlive g_keepalive;
+
 class SessionMissing : public std::runtime_error {
  public:
   SessionMissing() : std::runtime_error("no session; POST /session first") {}
@@ -603,6 +683,8 @@ int main(int argc, char **argv) {
       g.api_key = next("--api-key");
     } else if (a == "--url") {
       url = next("--url");
+    } else if (a == "--keepalive") {
+      g_keepalive.interval = std::stod(next("--keepalive"));
     } else if (a == "--agent") {
       kbridge::ops::agent_path() = next("--agent");
     } else if (a == "--insecure") {
@@ -624,6 +706,7 @@ int main(int argc, char **argv) {
           "  --port P        ポート（既定 8787）\n"
           "  --api-key K     X-Bridge-Key を必須にする\n"
           "  --url U         起動時に接続する VSCode Compatible URL\n"
+          "  --keepalive S   idle S sec -> run `pass` on the kernel (0=off, default 240)\n"
           "  --agent PATH    kaggle/kbagent.py の場所\n"
           "  --insecure      サーバ証明書を検証しない（試験用）\n",
           VERSION);
@@ -654,6 +737,13 @@ int main(int argc, char **argv) {
       std::printf("startup connect failed: %s\n", e.what());
     }
   }
+  g_keepalive.start();
+  if (g_keepalive.interval > 0) {
+    std::printf("keepalive: every %gs when idle\n", g_keepalive.interval);
+  } else {
+    std::printf("keepalive: off\n");
+  }
+
   if (host != "127.0.0.1" && host != "localhost" && host != "::1" &&
       g.api_key.empty()) {
     std::printf("warning: loopback 以外に bind するなら --api-key を付けること\n");

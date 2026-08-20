@@ -44,6 +44,81 @@ class SessionMissing(Exception):
 state = State()
 
 
+# --------------------------------------------------------------- keep-alive
+#
+# Kaggle の interactive セッションには idle タイマーがある（実測 30 分前後。
+# 公式値は 20 分 / 40 分 / 1 時間と報告がばらつく）。/job で切り離した学習を
+# 回している間、呼ぶ側がログを見に来なければ Kaggle へは 1 バイトも流れず、
+# そのままセッションを回収される。
+#
+# ここでは「最後にカーネルへ話しかけてから interval 秒経ったら `pass` を 1 セル
+# 実行する」だけをやる。WebSocket のプロトコル ping では駄目で（Kaggle の
+# プロキシ手前で終わるので上流の帳簿に効かない）、実際の execute_request が要る。
+#
+# カーネル活動だけで Kaggle の idle タイマーが戻るかは**未確定**。既知の回避策は
+# ブラウザ側の DOM クリックで、あれはノートブック文書の更新も一緒にやっている。
+# 40 分放置して生き残るかを 1 回測れば決着する。KEEPALIVE_DEFAULT の 240 秒は
+# その回避策の間隔（4〜6 分）に合わせた。
+
+KEEPALIVE_DEFAULT = 240.0
+
+
+class KeepAlive:
+    """アイドル時にカーネルへ `pass` を投げ続ける常駐スレッド。"""
+
+    def __init__(self, interval=KEEPALIVE_DEFAULT):
+        self.interval = float(interval)
+        self.count = 0
+        self.last_error = None
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        if self.interval <= 0 or self._thread is not None:
+            return self
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="kbridge-keepalive")
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self):
+        # 停止要求に素早く応じるため、待ちは 1 秒刻みで刻む。
+        while not self._stop.wait(min(1.0, self.interval)):
+            try:
+                self._tick()
+            except Exception as e:                  # スレッドは絶対に落とさない
+                self.last_error = "%s: %s" % (type(e).__name__, e)
+
+    def _tick(self):
+        c = state.client
+        if c is None or c.kernel_id is None:
+            return
+        idle = time.time() - c.last_activity
+        if idle < self.interval:
+            return
+        # 進行中の実行が居るなら、それ自体が活動なので譲る。長い /exec の
+        # 後ろに待ち行列を作らないよう、待たずに諦める。
+        if not state.lock.acquire(blocking=False):
+            return
+        try:
+            r = c.execute("pass", timeout=30.0)
+        finally:
+            state.lock.release()
+        self.count += 1
+        if r.get("status") == "ok":
+            self.last_error = None
+        else:
+            self.last_error = r.get("evalue") or r.get("status") or "unknown"
+        print("keepalive #%d after %.0fs idle: %s"
+              % (self.count, idle, r.get("status")), flush=True)
+
+
+keepalive = KeepAlive()
+
+
 def default_url():
     """--url も body も無いときの既定。環境変数 -> .kbridge.json の順。"""
     env = os.environ.get("KAGGLE_JUPYTER_URL")
@@ -403,6 +478,10 @@ def main(argv=None):
                     help="付けると X-Bridge-Key ヘッダを必須にする")
     ap.add_argument("--url", default=None,
                     help="起動時に接続する VSCode Compatible URL")
+    ap.add_argument("--keepalive", type=float, default=KEEPALIVE_DEFAULT,
+                    metavar="SECONDS",
+                    help="無通信がこの秒数続いたらカーネルに pass を投げる"
+                         "（0 で無効。既定 %d）" % KEEPALIVE_DEFAULT)
     args = ap.parse_args(argv)
 
     import uvicorn
@@ -418,6 +497,13 @@ def main(argv=None):
                   % (info["base_url"], info["kernel_id"], info["reuse"]))
         except Exception as e:      # 起動は続ける。後から POST /session できる
             print("startup connect failed: %s" % e)
+
+    keepalive.interval = args.keepalive
+    keepalive.start()
+    if args.keepalive > 0:
+        print("keepalive: every %gs when idle" % args.keepalive)
+    else:
+        print("keepalive: off")
 
     if args.host not in ("127.0.0.1", "localhost", "::1") and not args.api_key:
         print("warning: loopback 以外に bind するなら --api-key を付けること")

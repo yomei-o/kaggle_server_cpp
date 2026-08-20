@@ -25,6 +25,21 @@ Claude Code / curl / kbridge CLI
 * 時間の単位は秒 (float)。
 * トークンは**応答にもログにも出さない**（`base_url` は `****` でマスクして返す）。
 
+### keep-alive（サーバ起動オプション）
+
+`--keepalive SECONDS`（既定 240、`0` で無効）。**最後にカーネルへ話しかけてから
+SECONDS 秒経ったら `pass` を 1 セル実行する**だけの常駐スレッド。REST 面には出ない
+（エンドポイントは増やさない）。発火するたび stdout に
+`keepalive #<n> after <idle>s idle: <status>` を 1 行出す。
+
+* 進行中の実行があるときは打たない（それ自体が活動なので）。待ち行列も作らない。
+* Kaggle の interactive セッションには idle タイマがある（実測 30 分前後）。`/job` で
+  切り離した学習を回している間、呼ぶ側がログを見に来なければ Kaggle へは 1 バイトも
+  流れず、セッションを回収される。これを防ぐのが目的。
+* WebSocket のプロトコル ping では代用できない（Kaggle のプロキシ手前で終わる）。
+* **カーネル活動だけで Kaggle の idle タイマが戻るかは未検証。** README の
+  「keep-alive の効き方」を見ること。
+
 ## 1. セッション
 
 ### `GET /healthz`

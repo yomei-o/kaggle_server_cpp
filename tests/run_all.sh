@@ -14,3 +14,5 @@ echo "== e2e (python) ==";  python -u tests/e2e.py            | tail -3
 echo "== e2e (cpp) ==";     python -u tests/e2e.py --impl cpp | tail -3
 echo "== parity (server) =="; python -u tests/parity.py       | tail -3
 echo "== parity (cli) ==";    python -u tests/cli_parity.py   | tail -3
+echo "== keepalive (python) ==";  python -u tests/keepalive.py            | tail -3
+echo "== keepalive (cpp) ==";     python -u tests/keepalive.py --impl cpp | tail -3

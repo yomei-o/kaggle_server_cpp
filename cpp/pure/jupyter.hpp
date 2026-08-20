@@ -109,6 +109,10 @@ class JupyterClient {
 
   ~JupyterClient() { disconnect(); }
 
+  // 最後に Kaggle 側へ話しかけた時刻（epoch 秒）。
+  // kbridge_server.cpp の keep-alive スレッドがこれを見て発火を決める。
+  std::atomic<double> last_activity{now_seconds()};
+
   std::string safe_base() const { return mask_base(base_url_, token_); }
 
   json info() const {
@@ -232,6 +236,7 @@ class JupyterClient {
   // -------------------------------------------------------------- execute
   ExecResult execute(const std::string &code, double timeout = 300.0,
                      const EventFn &on_event = nullptr) {
+    last_activity = now_seconds();
     ensure();
     auto msg_id = hex_id();
     json msg{
@@ -356,6 +361,7 @@ class JupyterClient {
     }
 
     r.elapsed = std::round((now_seconds() - started) * 1000.0) / 1000.0;
+    last_activity = now_seconds();
     return r;
   }
 

@@ -59,6 +59,9 @@ class JupyterClient:
         self._reader = None
         self._stop = threading.Event()
         self._ws_error = None
+        # 最後に Kaggle 側へ話しかけた時刻（epoch 秒）。
+        # server.py の keep-alive スレッドがこれを見て発火を決める。
+        self.last_activity = time.time()
 
     # --------------------------------------------------------------- display
     @property
@@ -267,6 +270,7 @@ class JupyterClient:
         （spec/API.md の NDJSON と同じ形）。戻り値は /exec の応答そのもの。
         """
         self.ensure()
+        self.last_activity = time.time()
         msg_id = uuid.uuid4().hex
         msg = {"header": {"msg_id": msg_id, "username": "kbridge",
                           "session": self.session_id, "date": _now_iso(),
@@ -365,6 +369,7 @@ class JupyterClient:
             with self._subs_lock:
                 self._subs.pop(msg_id, None)
         out["elapsed"] = round(time.time() - started, 3)
+        self.last_activity = time.time()
         return out
 
     def execute_json(self, code, timeout=120.0):

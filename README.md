@@ -189,12 +189,14 @@ python -m kbridge.cli get work/best.ckpt ./best.ckpt
 喋る偽サーバなので、GPU 無料枠を 1 秒も使わずに全部通せる。
 
 ```sh
-sh tests/run_all.sh              # 下の 4 つを順に回す
+sh tests/run_all.sh              # 下の 6 つを順に回す
 
 python tests/e2e.py              # python 版サーバを起動して 37 項目
 python tests/e2e.py --impl cpp   # cpp 版サーバで同じ 37 項目
 python tests/parity.py           # 両サーバの応答が一致するか（29 項目）
 python tests/cli_parity.py       # 両 CLI の出力と終了コードが一致するか（11 項目）
+python tests/keepalive.py                # keep-alive が発火するか（6 項目）
+python tests/keepalive.py --impl cpp     # cpp 版で同じ 6 項目
 ```
 
 `tests/parity.py` は「カーネルへ送るコード文字列」も突き合わせる。ここが一致していれば、
@@ -208,6 +210,42 @@ python tests/fake_jupyter.py --port 8899
 ```
 
 ---
+
+## 5. keep-alive（セッションが 30 分で切れる件）
+
+ローカルサーバは既定で、**最後にカーネルへ話しかけてから 240 秒経つと `pass` を
+1 セル実行する**。`--keepalive 0` で無効、`--keepalive 600` などで間隔変更。
+
+```sh
+./kbridge_server.exe --port 8787                  # 既定 240 秒
+python -m kbridge.server --port 8787 --keepalive 0  # 無効
+#   keepalive: every 240s when idle
+#   keepalive #1 after 240s idle: ok               <- 発火するとこれが出る
+```
+
+なぜ要るか: Kaggle の interactive セッションには idle タイマがある（実測 30 分前後。
+公式値の報告は 20 分 / 40 分 / 1 時間とばらつく）。`/job` で切り離した学習を回している
+間、呼ぶ側がログを見に来なければ **Kaggle へは 1 バイトも流れない**。それで回収される。
+WebSocket のプロトコル ping では代用できない（Kaggle のプロキシ手前で終わるので上流の
+帳簿に効かない。そもそも既定の 30 秒 ping は接続を落とすので切ってある）。
+
+### keep-alive の効き方 — まだ検証していない
+
+**カーネル活動だけで Kaggle の idle タイマが戻るかは未確認。** 偽 Jupyter 相手に
+「アイドルが続けば execute_request が飛ぶ」ことは `tests/keepalive.py` で確認済みだが、
+本物で 40 分放置して生き残るかは測っていない。効かなかった場合の次の手は 2 つ:
+
+* 既知の回避策は[ブラウザ側の DOM クリック](https://greasyfork.org/en/scripts/504382-keep-kaggle-notebook-alive/code)
+  で、4〜6 分ごとに Add cell → Run current cell → Cut cell を押す。セル実行だけでなく
+  **ノートブック文書の更新**も一緒にやっているのが引っかかる点。Kaggle の活動判定が
+  `www.kaggle.com` 側（ログイン Cookie が必要な経路）を見ているなら、jupyter-proxy
+  越しの実行では届かない。
+* [Commit（Save & Run All）には idle タイマが無い](https://www.kaggle.com/general/232625)。
+  ブラウザを閉じても走る。数時間の計算はこちらが本筋で、`/batch/push` がその入口。
+
+あわせて確認すべき落とし穴: セッションが回収されると `/kaggle/working` の中身も消える。
+Notebook の Settings → **Persistence** を有効にしていないと、こまめに書いた
+チェックポイントも道連れになる。
 
 ## 5. 気をつけること
 

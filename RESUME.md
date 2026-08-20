@@ -75,6 +75,23 @@ T4 は `sm_75`。GPU を使うには Notebook の Settings → Accelerator を G
 
 ---
 
+## keep-alive の状態（2026-08-20）
+
+`--keepalive SECONDS`（既定 240、0 で無効）を両実装に入れた。アイドルが続いたら
+カーネルへ `pass` を 1 セル投げるだけの常駐スレッド。`tests/keepalive.py` が
+両実装で 6/6（偽 Jupyter 相手、間隔 2 秒で発火と非発火を見る）。
+
+**未検証: 本物の Kaggle で 40 分放置して生き残るか。** カーネル活動が Kaggle の
+idle タイマを戻すかどうかがまだ分かっていない。これを 1 回測れば、以下のどちらに
+進むかが決まる（詳細は README の「keep-alive の効き方」）:
+
+* 効いた → これで終わり。
+* 効かない → Kaggle の活動判定は `www.kaggle.com` 側を見ている。`/batch`（Commit は
+  idle タイマ無し）へ寄せる、またはブラウザ側 userscript を併用する。
+
+派生して確認したいこと: セッション回収時に `/kaggle/working` が消えるので、
+Notebook の Settings → Persistence を有効にしておく必要がある。
+
 ## 残作業
 
 ### ⏭ 1. 車番認識の学習を実際に載せる（次の本命）
